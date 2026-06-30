@@ -968,25 +968,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const offerOptOut = deleteSafeguard.gatePromptCount >= 3;
 
           const lines = [
-            `⛔ DELETE BLOCKED — confirmation required.`,
+            `🛟 Quick safety check before deleting.`,
             ``,
-            `You are about to PERMANENTLY delete ${doctype} '${name}'. This cannot be undone.`,
+            `This will permanently remove ${doctype} '${name}', and it can't be undone — so let's just confirm first.`,
             ``,
-            `Before proceeding you MUST:`,
-            `  1. Tell the user exactly what will be deleted (${doctype} '${name}').`,
-            `  2. Get the user's explicit approval.`,
+            `Two small steps:`,
+            `  1. Let the user know exactly what's about to be deleted (${doctype} '${name}').`,
+            `  2. Wait for their go-ahead.`,
             ``,
-            `Once — and only once — the user has approved, re-call delete_document with the same`,
-            `doctype and name plus confirm_token: "${token}". The token is single-use, valid for ~5`,
-            `minutes, and only works for this exact document.`,
+            `Once they've said yes, call delete_document again with the same doctype and name plus`,
+            `confirm_token: "${token}". The token works only for this document and expires in about 5 minutes.`,
           ];
           if (offerOptOut) {
             lines.push(
               ``,
-              `This is delete #${deleteSafeguard.gatePromptCount} this session. You may now also ASK the`,
-              `user whether they want to stop being prompted for the rest of the session. If — and only`,
-              `if — they explicitly say yes, include skip_future_confirmations: true alongside the`,
-              `confirm_token on the next call to disable this safeguard for the remainder of the session.`
+              `(That's delete #${deleteSafeguard.gatePromptCount} this session — no pressure!) If the user would`,
+              `rather not be asked every time, feel free to check with them. If they say yes, add`,
+              `skip_future_confirmations: true alongside the confirm_token next time and I'll stop prompting`,
+              `for the rest of the session.`
             );
           }
 
@@ -1033,9 +1032,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         let optOutNote: string | undefined;
         if (skipFutureConfirmations) {
           optOutNote =
-            "⚠️ Delete confirmations are now DISABLED for the rest of this session (until the MCP server restarts).";
+            "👍 Got it — I'll skip the delete confirmations for the rest of this session (they'll come back when the MCP server restarts).";
         } else if (deleteSafeguard.skipConfirmations) {
-          optOutNote = "(delete confirmations are disabled for this session)";
+          optOutNote = "(heads up: delete confirmations are off for this session)";
         }
 
         return {
