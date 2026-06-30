@@ -4,6 +4,21 @@ A Model Context Protocol server for ERPNext integration
 
 This is a TypeScript-based MCP server that provides integration with ERPNext/Frappe API. It enables AI assistants to interact with ERPNext data and functionality through the Model Context Protocol.
 
+## About this fork
+
+This is a fork of [`rakeshgangwar/erpnext-mcp-server`](https://github.com/rakeshgangwar/erpnext-mcp-server).
+
+**Why the fork exists.** ERPNext deletes are permanent — a submitted document must be cancelled first, but a draft (or any record that passes referential checks) is gone the moment `delete_document` runs, with no undo. When an AI assistant drives the MCP server, a single misread instruction can quietly destroy real business data. We wanted a guardrail that forces a deliberate, human-acknowledged pause before anything is deleted, without changing how the other tools behave.
+
+**What changed.** Only the `delete_document` tool was modified; the other 10 tools are untouched and fully backward compatible. It now uses a two-step confirmation handshake:
+
+1. **First call is blocked.** Any `delete_document` call without a valid token is refused. The server returns a single-use `confirm_token` that is bound to that exact `doctype`+`name` and expires after ~5 minutes. The response also instructs the assistant to tell the user precisely what will be deleted and to get explicit approval first.
+2. **Second call deletes.** Once the user approves, the assistant re-calls `delete_document` with the same `doctype`/`name` plus the `confirm_token`. The token is consumed (single use) and the delete proceeds.
+
+**Opt-out.** From the 3rd gated delete in a session onward, the assistant may offer the user a `skip_future_confirmations` flag. If the user explicitly agrees, passing that flag (with a valid token) disables the safeguard for the rest of the session. A "session" is the lifetime of the MCP server process — state resets on restart.
+
+The confirmation copy is intentionally friendly and conversational ("🛟 Quick safety check before deleting…") rather than alarming.
+
 ## Features
 
 ### Resources
@@ -17,7 +32,7 @@ This is a TypeScript-based MCP server that provides integration with ERPNext/Fra
 - `get_document` - Get a single document by name, including all child tables
 - `create_document` - Create a new document in ERPNext
 - `update_document` - Update an existing document in ERPNext
-- `delete_document` - Permanently delete a document
+- `delete_document` - Permanently delete a document (gated by a two-step confirmation safeguard — see [About this fork](#about-this-fork))
 - `submit_document` - Submit a document (set docstatus to 1)
 - `cancel_document` - Cancel a submitted document (set docstatus to 2)
 - `call_method` - Call an ERPNext/Frappe whitelisted server-side API method

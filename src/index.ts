@@ -22,6 +22,7 @@ import {
   ReadResourceRequestSchema
 } from "@modelcontextprotocol/sdk/types.js";
 import axios, { AxiosInstance } from "axios";
+import { randomUUID } from "crypto";
 
 // ERPNext API client configuration
 class ERPNextClient {
@@ -228,6 +229,47 @@ const doctypeCache = new Map<string, any>();
 
 // Initialize ERPNext client
 const erpnext = new ERPNextClient();
+
+/**
+ * Per-session delete-confirmation safeguard state.
+ *
+ * State lives for the lifetime of this server process. One process = one MCP
+ * session = one Claude Code run; restarting Claude Code resets all of this.
+ *
+ * Goal: no ERPNext document is ever permanently deleted without the user being
+ * explicitly asked, until the user chooses to opt out of the prompts.
+ */
+const DELETE_TOKEN_TTL_MS = 5 * 60 * 1000; // confirm tokens are valid ~5 minutes
+const deleteSafeguard = {
+  gatePromptCount: 0,        // how many delete requests have hit the gate this session
+  skipConfirmations: false,  // true once the user opts out for the rest of the session
+  pendingTokens: new Map<string, { doctype: string; name: string; ts: number }>(),
+};
+
+// Issue a fresh single-use confirmation token bound to a specific document.
+function issueDeleteToken(doctype: string, name: string): string {
+  const token = randomUUID();
+  deleteSafeguard.pendingTokens.set(token, { doctype, name, ts: Date.now() });
+  return token;
+}
+
+// Validate (and consume) a confirmation token for a specific document.
+// Returns an error string if invalid, or null if the token is good and was consumed.
+function consumeDeleteToken(token: string, doctype: string, name: string): string | null {
+  const entry = deleteSafeguard.pendingTokens.get(token);
+  if (!entry) {
+    return "Invalid or already-used confirm_token. Re-call delete_document without a token to start a fresh confirmation.";
+  }
+  // Always consume so a token can never be reused, even on a mismatch.
+  deleteSafeguard.pendingTokens.delete(token);
+  if (Date.now() - entry.ts > DELETE_TOKEN_TTL_MS) {
+    return "confirm_token has expired. Re-call delete_document without a token to start a fresh confirmation.";
+  }
+  if (entry.doctype !== doctype || entry.name !== name) {
+    return `confirm_token does not match this document. It was issued for ${entry.doctype} '${entry.name}', not ${doctype} '${name}'. Re-call without a token to start a fresh confirmation.`;
+  }
+  return null;
+}
 
 // Create an MCP server with capabilities for resources and tools
 const server = new Server(
@@ -566,7 +608,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "delete_document",
-        description: "Permanently delete a document from ERPNext. This action cannot be undone. Submitted documents must be cancelled before deletion.",
+        description: "Permanently delete a document from ERPNext. This action cannot be undone. Submitted documents must be cancelled before deletion. SAFEGUARD: the first delete attempt of a session is BLOCKED and returns a one-time confirm_token — you must explicitly confirm with the user, then re-call with that token. From the 3rd delete onward you may also offer the user skip_future_confirmations to disable the prompt for the rest of the session.",
         inputSchema: {
           type: "object",
           properties: {
@@ -577,6 +619,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             name: {
               type: "string",
               description: "Document name/ID"
+            },
+            confirm_token: {
+              type: "string",
+              description: "One-time token returned by a prior blocked delete attempt. Only pass this AFTER the user has explicitly confirmed the deletion. The token is single-use, bound to this exact doctype+name, and expires after ~5 minutes."
+            },
+            skip_future_confirmations: {
+              type: "boolean",
+              description: "Pass true (together with a valid confirm_token) ONLY when the user has explicitly asked to stop being warned about deletes. Disables the delete confirmation safeguard for the rest of the session."
             }
           },
           required: ["doctype", "name"]
@@ -895,23 +945,106 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     case "delete_document": {
       const doctype = String(request.params.arguments?.doctype);
       const name = String(request.params.arguments?.name);
-      
+      const confirmToken = request.params.arguments?.confirm_token
+        ? String(request.params.arguments.confirm_token)
+        : undefined;
+      const skipFutureConfirmations =
+        request.params.arguments?.skip_future_confirmations === true;
+
       if (!doctype || !name) {
         throw new McpError(
           ErrorCode.InvalidParams,
           "Doctype and name are required"
         );
       }
-      
+
+      // Confirmation safeguard: unless the user has opted out for this session,
+      // a delete must be confirmed via a one-time token before it is carried out.
+      if (!deleteSafeguard.skipConfirmations) {
+        if (!confirmToken) {
+          // First leg of the handshake: block the delete and issue a token.
+          deleteSafeguard.gatePromptCount += 1;
+          const token = issueDeleteToken(doctype, name);
+          const offerOptOut = deleteSafeguard.gatePromptCount >= 3;
+
+          const lines = [
+            `🛟 Quick safety check before deleting.`,
+            ``,
+            `This will permanently remove ${doctype} '${name}', and it can't be undone — so let's just confirm first.`,
+            ``,
+            `Two small steps:`,
+            `  1. Let the user know exactly what's about to be deleted (${doctype} '${name}').`,
+            `  2. Wait for their go-ahead.`,
+            ``,
+            `Once they've said yes, call delete_document again with the same doctype and name plus`,
+            `confirm_token: "${token}". The token works only for this document and expires in about 5 minutes.`,
+          ];
+          if (offerOptOut) {
+            lines.push(
+              ``,
+              `(That's delete #${deleteSafeguard.gatePromptCount} this session — no pressure!) If the user would`,
+              `rather not be asked every time, feel free to check with them. If they say yes, add`,
+              `skip_future_confirmations: true alongside the confirm_token next time and I'll stop prompting`,
+              `for the rest of the session.`
+            );
+          }
+
+          return {
+            content: [{ type: "text", text: JSON.stringify({
+              status: "confirmation_required",
+              action: "blocked",
+              doctype,
+              name,
+              confirm_token: token,
+              delete_attempt_this_session: deleteSafeguard.gatePromptCount,
+              offer_skip_future_confirmations: offerOptOut,
+              message: lines.join("\n")
+            }, null, 2) }]
+          };
+        }
+
+        // Second leg: a token was supplied — validate (and consume) it.
+        const tokenError = consumeDeleteToken(confirmToken, doctype, name);
+        if (tokenError) {
+          return {
+            content: [{ type: "text", text: JSON.stringify({
+              status: "confirmation_invalid",
+              action: "blocked",
+              doctype,
+              name,
+              message: tokenError
+            }, null, 2) }],
+            isError: true
+          };
+        }
+
+        // The user confirmed via a valid token. If they also asked to stop being
+        // prompted, honour that intent now — independent of whether the ERPNext
+        // delete below succeeds, so a transient failure doesn't discard the choice.
+        if (skipFutureConfirmations) {
+          deleteSafeguard.skipConfirmations = true;
+        }
+      }
+
       try {
         await erpnext.deleteDocument(doctype, name);
+
+        let optOutNote: string | undefined;
+        if (skipFutureConfirmations) {
+          optOutNote =
+            "👍 Got it — I'll skip the delete confirmations for the rest of this session (they'll come back when the MCP server restarts).";
+        } else if (deleteSafeguard.skipConfirmations) {
+          optOutNote = "(heads up: delete confirmations are off for this session)";
+        }
+
         return {
           content: [{ type: "text", text: JSON.stringify({
             status: "success",
             action: "deleted",
             doctype: doctype,
-            name: name
-          }) }]
+            name: name,
+            ...(optOutNote ? { note: optOutNote } : {})
+          }, null, 2) }]
         };
       } catch (error: any) {
         return {
