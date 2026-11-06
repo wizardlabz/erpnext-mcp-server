@@ -1,21 +1,21 @@
 # ERPNext MCP Server
 
-A Model Context Protocol server for ERPNext integration
+**Connect AI assistants to ERPNext — with a guardrail that makes deletes deliberate.**
 
-This is a TypeScript-based MCP server that provides integration with ERPNext/Frappe API. It enables AI assistants to interact with ERPNext data and functionality through the Model Context Protocol.
+A TypeScript [Model Context Protocol](https://modelcontextprotocol.io) server for ERPNext/Frappe. Any MCP client — Claude Desktop, Claude Code, Cursor, Cline and others — can browse DocTypes, read and search documents, create, update, submit and cancel records, call whitelisted server methods and run reports against your ERPNext instance, using the same REST API you would use yourself.
 
-## About this fork
+This is the version we run at [Wizard Labz](https://wizardlabz.com) when an assistant works against a live ERP. It differs from the upstream project in one way that matters: **nothing is deleted without a human saying so.**
 
-This is a fork of [`rakeshgangwar/erpnext-mcp-server`](https://github.com/rakeshgangwar/erpnext-mcp-server).
+## Delete safeguard
 
-**Why the fork exists.** ERPNext deletes are permanent — a submitted document must be cancelled first, but a draft (or any record that passes referential checks) is gone the moment `delete_document` runs, with no undo. When an AI assistant drives the MCP server, a single misread instruction can quietly destroy real business data. We wanted a guardrail that forces a deliberate, human-acknowledged pause before anything is deleted, without changing how the other tools behave.
+ERPNext deletes are permanent. A submitted document has to be cancelled first, but a draft — or any record that passes referential checks — is gone the moment `delete_document` runs, with no undo. When an AI assistant is driving, a single misread instruction can quietly destroy real business data.
 
-**What changed.** Only the `delete_document` tool was modified; the other 10 tools are untouched and fully backward compatible. It now uses a two-step confirmation handshake:
+This server turns `delete_document` into a two-step handshake. The other ten tools are untouched and fully backward compatible.
 
-1. **First call is blocked.** Any `delete_document` call without a valid token is refused. The server returns a single-use `confirm_token` that is bound to that exact `doctype`+`name` and expires after ~5 minutes. The response also instructs the assistant to tell the user precisely what will be deleted and to get explicit approval first.
-2. **Second call deletes.** Once the user approves, the assistant re-calls `delete_document` with the same `doctype`/`name` plus the `confirm_token`. The token is consumed (single use) and the delete proceeds.
+1. **First call is refused.** Any `delete_document` call without a valid token is blocked. The server returns a single-use `confirm_token` bound to that exact `doctype` + `name`, expiring after about 5 minutes, together with an instruction to the assistant: tell the user precisely what will be deleted and get explicit approval.
+2. **Second call deletes.** Once the user approves, the assistant calls `delete_document` again with the same `doctype`/`name` plus the `confirm_token`. The token is consumed and the delete proceeds.
 
-**Opt-out.** From the 3rd gated delete in a session onward, the assistant may offer the user a `skip_future_confirmations` flag. If the user explicitly agrees, passing that flag (with a valid token) disables the safeguard for the rest of the session. A "session" is the lifetime of the MCP server process — state resets on restart.
+**Opt-out.** From the third gated delete in a session, the assistant may offer the user a `skip_future_confirmations` flag. If the user explicitly agrees, passing that flag with a valid token disables the safeguard for the rest of the session. A session is the lifetime of the MCP server process; state resets on restart.
 
 The confirmation copy is intentionally friendly and conversational ("🛟 Quick safety check before deleting…") rather than alarming.
 
@@ -32,7 +32,7 @@ The confirmation copy is intentionally friendly and conversational ("🛟 Quick 
 - `get_document` - Get a single document by name, including all child tables
 - `create_document` - Create a new document in ERPNext
 - `update_document` - Update an existing document in ERPNext
-- `delete_document` - Permanently delete a document (gated by a two-step confirmation safeguard — see [About this fork](#about-this-fork))
+- `delete_document` - Permanently delete a document (gated by the two-step confirmation safeguard — see [Delete safeguard](#delete-safeguard))
 - `submit_document` - Submit a document (set docstatus to 1)
 - `cancel_document` - Cancel a submitted document (set docstatus to 2)
 - `call_method` - Call an ERPNext/Frappe whitelisted server-side API method
@@ -153,3 +153,7 @@ The Inspector will provide a URL to access debugging tools in your browser.
 }
 </arguments>
 </use_mcp_tool>
+
+## Origin
+
+Forked from [`rakeshgangwar/erpnext-mcp-server`](https://github.com/rakeshgangwar/erpnext-mcp-server), which provides the ERPNext integration itself. The delete safeguard is the only behavioural change; upstream improvements can be merged without touching it.
